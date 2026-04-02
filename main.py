@@ -1,155 +1,128 @@
+#!/usr/bin/env python3
 """
-Point d'entrée principal du projet.
-Orchestre : extraction de features -> entraînement -> prédiction.
+Pipeline complet : extraction → entraînement → prédiction.
 
-Stratégie anti-domain-shift :
-  - Augmentation de couleur forte (simule les variations de coloration inter-centres)
-  - Extraction de features N_AUG_TRAIN fois avec augmentations différentes
-  - TTA (Test-Time Augmentation) à l'inférence
+Fonctionnalités clés contre le distribution shift :
+  1. DINOv2 comme backbone (features robustes apprises par self-supervised learning)
+  2. Augmentation de couleur agressive (simule les variations de staining)
+  3. Dropout dans la tête de classification (régularisation)
+  4. Test-Time Augmentation (TTA) : moyenne de N prédictions augmentées
+
+Reprise d'entraînement :
+  Le script sauvegarde automatiquement le dernier checkpoint.
+  Pour reprendre après un arrêt, relancer simplement `python main.py --resume`.
 
 Usage :
-    python main.py
+  python main.py                   # entraînement complet
+  python main.py --resume          # reprendre depuis le dernier checkpoint
+  python main.py --predict-only    # prédiction uniquement (nécessite best_model.pth)
 """
 
+import argparse
+import os
+
 import torch
-import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 
 import config
-from utils import set_seed, get_device
+from utils import set_seed, get_device, load_checkpoint
+from transforms import get_train_transform, get_val_transform
 from dataset import BaselineDataset, PrecomputedDataset
-from model import build_feature_extractor, build_mlp_probe
+from model import build_feature_extractor, build_classifier
 from feature_extraction import precompute_features
 from train import train
-from predict import predict
+from predict import predict_with_tta
 
 
-def build_train_transform():
-    """
-    Preprocessing pour le train avec augmentation forte anti-domain-shift.
-    Images : float16 [0,1] (C,H,W) -> float32 [0,1] normalisé ImageNet.
-    ColorJitter fort pour simuler les variations de coloration histologique.
-    """
-    return transforms.Compose([
-        transforms.Lambda(lambda x: x.float()),
-        transforms.Resize(config.PREPROCESSING_SIZE, antialias=True),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomApply([
-            transforms.ColorJitter(
-                brightness=config.COLOR_JITTER_BRIGHTNESS,
-                contrast=config.COLOR_JITTER_CONTRAST,
-                saturation=config.COLOR_JITTER_SATURATION,
-                hue=config.COLOR_JITTER_HUE,
-            )
-        ], p=0.9),
-        transforms.RandomGrayscale(p=0.02),
-        transforms.Normalize(mean=config.IMAGENET_MEAN, std=config.IMAGENET_STD),
-    ])
-
-
-def build_val_transform():
-    """
-    Preprocessing pour validation/test (sans augmentation aléatoire).
-    """
-    return transforms.Compose([
-        transforms.Lambda(lambda x: x.float()),
-        transforms.Resize(config.PREPROCESSING_SIZE, antialias=True),
-        transforms.Normalize(mean=config.IMAGENET_MEAN, std=config.IMAGENET_STD),
-    ])
+def parse_args():
+    parser = argparse.ArgumentParser(description="Histopathology classification")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reprendre l'entraînement depuis le dernier checkpoint")
+    parser.add_argument("--predict-only", action="store_true",
+                        help="Seulement prédire (nécessite un best_model.pth)")
+    parser.add_argument("--no-tta", action="store_true",
+                        help="Désactiver le TTA lors de la prédiction")
+    return parser.parse_args()
 
 
 def main():
-    # --- Initialisation ---
+    args = parse_args()
+
     set_seed(config.SEED)
     device = get_device()
 
-    val_transform = build_val_transform()
+    # ━━━ 1. Backbone DINOv2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    print("\n╔══ Chargement du backbone DINOv2 ══╗")
+    backbone = build_feature_extractor(config.BACKBONE, device)
+    feat_dim = backbone.num_features
+    print(f"  Backbone : {config.BACKBONE}  →  dim={feat_dim}")
 
-    # --- 1. Feature extractor ---
-    print("\n=== Chargement du feature extractor DINOv2 ===")
-    feature_extractor = build_feature_extractor(config.FEATURE_EXTRACTOR_NAME, device)
-    print(f"Backbone: {config.FEATURE_EXTRACTOR_NAME} | Features: {feature_extractor.num_features}D")
+    if args.predict_only:
+        # ━━━ Prédiction seule ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        print("\n╔══ Mode prédiction uniquement ══╗")
+        classifier = build_classifier(feat_dim, config.HIDDEN_DIM, config.DROPOUT, device)
+        load_checkpoint(config.BEST_MODEL_PATH, classifier, device=device)
+        classifier.eval()
 
-    # --- 2. Extraction multi-augmentation pour le train ---
-    # On extrait N_AUG_TRAIN fois les features d'entraînement avec des augmentations
-    # différentes à chaque passe. Cela diversifie les features et rend le MLP robuste
-    # aux variations de coloration inter-centres.
-    print(f"\n=== Extraction des features train ({config.N_AUG_TRAIN} passes d'augmentation) ===")
-
-    all_train_features = []
-    all_train_labels = []
-
-    for aug_idx in range(config.N_AUG_TRAIN):
-        print(f"  Passe {aug_idx + 1}/{config.N_AUG_TRAIN}")
-        set_seed(config.SEED + aug_idx)  # seed différente -> augmentations différentes
-        train_transform = build_train_transform()
-        train_dataset = BaselineDataset(config.TRAIN_IMAGES_PATH, train_transform, mode="train")
-        train_loader = DataLoader(
-            train_dataset, shuffle=False, batch_size=config.BATCH_SIZE,
-            num_workers=0, pin_memory=device.type == "cuda",
+        tta = 1 if args.no_tta else config.TTA_RUNS
+        predict_with_tta(
+            config.TEST_H5, backbone, classifier, device,
+            config.OUTPUT_CSV, tta_runs=tta, threshold=config.THRESHOLD,
         )
-        feats, labels = precompute_features(train_loader, feature_extractor, device)
-        all_train_features.append(feats)
-        all_train_labels.append(labels)
+        return
 
-    train_features = torch.cat(all_train_features, dim=0)
-    train_labels = torch.cat(all_train_labels, dim=0)
-    print(f"Dataset train augmenté : {len(train_features)} samples ({config.N_AUG_TRAIN}x)")
+    # ━━━ 2. Datasets bruts + extraction de features ━━━━━━━━━━━━
+    print("\n╔══ Extraction des features ══╗")
 
-    # --- 3. Extraction des features de validation (sans augmentation) ---
-    print("\n=== Extraction des features validation ===")
-    val_dataset = BaselineDataset(config.VAL_IMAGES_PATH, val_transform, mode="train")
+    # Train : avec augmentations de couleur pour que les features capturent
+    # la variabilité de staining (le backbone est gelé, mais les augmentations
+    # changent les valeurs de pixels en entrée !)
+    print("  Train features :")
+    train_ds = BaselineDataset(config.TRAIN_H5, get_train_transform(), mode="train")
+    train_loader_raw = DataLoader(train_ds, batch_size=config.BATCH_SIZE,
+                                  shuffle=False, num_workers=config.NUM_WORKERS,
+                                  pin_memory=True)
+    train_feats, train_labels = precompute_features(train_loader_raw, backbone, device)
+
+    # Validation : sans augmentation
+    print("  Val features :")
+    val_ds = BaselineDataset(config.VAL_H5, get_val_transform(), mode="train")
+    val_loader_raw = DataLoader(val_ds, batch_size=config.BATCH_SIZE,
+                                shuffle=False, num_workers=config.NUM_WORKERS,
+                                pin_memory=True)
+    val_feats, val_labels = precompute_features(val_loader_raw, backbone, device)
+
+    # DataLoaders sur features pré-calculées (très rapide)
+    train_loader = DataLoader(
+        PrecomputedDataset(train_feats, train_labels),
+        batch_size=config.BATCH_SIZE, shuffle=True,
+    )
     val_loader = DataLoader(
-        val_dataset, shuffle=False, batch_size=config.BATCH_SIZE,
-        num_workers=0, pin_memory=device.type == "cuda",
-    )
-    val_features, val_labels = precompute_features(val_loader, feature_extractor, device)
-
-    # DataLoaders sur features pré-calculées
-    precomp_train = PrecomputedDataset(train_features, train_labels)
-    precomp_val = PrecomputedDataset(val_features, val_labels)
-
-    precomp_train_loader = DataLoader(precomp_train, shuffle=True, batch_size=config.BATCH_SIZE)
-    precomp_val_loader = DataLoader(precomp_val, shuffle=False, batch_size=config.BATCH_SIZE)
-
-    # --- 4. Entraînement du MLP probe ---
-    print("\n=== Entraînement du MLP probe ===")
-    mlp_probe = build_mlp_probe(feature_extractor.num_features, device=device)
-    print(f"Architecture MLP: {feature_extractor.num_features} -> 512 -> 256 -> 1")
-
-    train(
-        model=mlp_probe,
-        train_dataloader=precomp_train_loader,
-        val_dataloader=precomp_val_loader,
-        optimizer_name=config.OPTIMIZER,
-        optimizer_params=config.OPTIMIZER_PARAMS,
-        loss_name=config.LOSS,
-        metric_name=config.METRIC,
-        num_epochs=config.NUM_EPOCHS,
-        patience=config.PATIENCE,
-        save_path=config.BEST_MODEL_PATH,
-        device=device,
+        PrecomputedDataset(val_feats, val_labels),
+        batch_size=config.BATCH_SIZE, shuffle=False,
     )
 
-    # --- 5. Prédiction sur le test set avec TTA ---
-    print("\n=== Prédiction avec TTA ===")
-    mlp_probe.load_state_dict(torch.load(config.BEST_MODEL_PATH, weights_only=True))
-    mlp_probe.eval()
+    # ━━━ 3. Entraînement ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    print("\n╔══ Entraînement du classifieur ══╗")
+    classifier = build_classifier(feat_dim, config.HIDDEN_DIM, config.DROPOUT, device)
 
-    predict(
-        test_path=config.TEST_IMAGES_PATH,
-        feature_extractor=feature_extractor,
-        classifier=mlp_probe,
-        val_transform=val_transform,
-        aug_transform_fn=build_train_transform,
-        n_aug=config.N_AUG_TEST,
-        output_csv=config.OUTPUT_CSV_PATH,
-        device=device,
-        batch_size=config.BATCH_SIZE,
+    resume_path = config.LAST_MODEL_PATH if args.resume else None
+    train(classifier, train_loader, val_loader, device, resume_path=resume_path)
+
+    # ━━━ 4. Prédiction avec TTA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    print("\n╔══ Prédiction sur le test set ══╗")
+    # Charger le meilleur modèle
+    classifier = build_classifier(feat_dim, config.HIDDEN_DIM, config.DROPOUT, device)
+    load_checkpoint(config.BEST_MODEL_PATH, classifier, device=device)
+    classifier.eval()
+
+    tta = 1 if args.no_tta else config.TTA_RUNS
+    predict_with_tta(
+        config.TEST_H5, backbone, classifier, device,
+        config.OUTPUT_CSV, tta_runs=tta, threshold=config.THRESHOLD,
     )
 
-    print("\nTerminé !")
+    print("\n✓ Terminé !")
 
 
 if __name__ == "__main__":

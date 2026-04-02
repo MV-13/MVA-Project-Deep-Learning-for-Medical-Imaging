@@ -1,6 +1,6 @@
 """
-Pré-calcul des features avec le feature extractor.
-Permet d'éviter de recalculer les embeddings à chaque époque.
+Pré-extraction des features DINOv2 pour tout un DataLoader.
+Stocke les résultats en mémoire pour un entraînement ultra-rapide du classifieur.
 """
 
 import numpy as np
@@ -8,28 +8,29 @@ import torch
 from tqdm import tqdm
 
 
-def precompute_features(dataloader, model, device):
+@torch.no_grad()
+def precompute_features(dataloader, backbone, device):
     """
-    Extrait les features de toutes les images d'un dataloader via le modèle donné.
+    Extrait les embeddings DINOv2 de toutes les images du dataloader.
 
     Args:
-        dataloader: DataLoader qui fournit (images, labels)
-        model: feature extractor (en mode eval)
-        device: device de calcul
+        dataloader: fournit (images, labels)
+        backbone: feature extractor gelé (eval mode)
+        device: 'cuda' ou 'cpu'
 
     Returns:
-        features: tensor (N, D)
-        labels: tensor (N,)
+        features: Tensor (N, D)
+        labels:   Tensor (N,)
     """
-    all_features = []
-    all_labels = []
+    backbone.eval()
+    all_feats, all_labels = [], []
 
-    for x, y in tqdm(dataloader, desc="Extraction des features", leave=False):
-        with torch.no_grad():
-            feats = model(x.to(device)).detach().cpu().numpy()
-        all_features.append(feats)
-        all_labels.append(y.numpy())
+    for imgs, labels in tqdm(dataloader, desc="[Features]", leave=False):
+        feats = backbone(imgs.to(device)).cpu()
+        all_feats.append(feats)
+        all_labels.append(labels.squeeze(-1))
 
-    features = torch.tensor(np.vstack(all_features))
-    labels = torch.tensor(np.hstack(all_labels))
+    features = torch.cat(all_feats, dim=0)
+    labels = torch.cat(all_labels, dim=0)
+    print(f"  → {features.shape[0]} images, embeddings dim={features.shape[1]}")
     return features, labels

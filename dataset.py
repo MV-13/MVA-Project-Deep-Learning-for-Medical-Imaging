@@ -1,7 +1,8 @@
 """
 Datasets pour le chargement des données histopathologiques.
-- BaselineDataset : charge les images depuis un fichier H5 et applique un prétraitement.
-- PrecomputedDataset : charge des features déjà extraites (pour le linear probing).
+
+BaselineDataset : lit les images depuis un .h5, applique une transformation.
+PrecomputedDataset : travaille sur les features déjà extraites (linear probing rapide).
 """
 
 import h5py
@@ -12,50 +13,58 @@ from torch.utils.data import Dataset
 
 class BaselineDataset(Dataset):
     """
-    Dataset qui lit les images et labels depuis un fichier H5.
+    Charge les images et labels depuis un fichier H5.
+
+    Structure attendue du H5 :
+        ├── idx
+        │   ├── img    (C, H, W) uint8
+        │   ├── label  scalar 0 ou 1
+        │   └── metadata
 
     Args:
-        dataset_path: chemin vers le fichier .h5
-        preprocessing: transformation torchvision à appliquer aux images
-        mode: 'train' pour retourner les labels, 'test' pour retourner None
+        h5_path: chemin vers le fichier .h5
+        transform: callable appliquée à l'image (torchvision transforms)
+        mode: 'train' → retourne (image, label) ;  'test' → retourne (image, None)
     """
 
-    def __init__(self, dataset_path, preprocessing, mode="train"):
-        super().__init__()
-        self.dataset_path = dataset_path
-        self.preprocessing = preprocessing
+    def __init__(self, h5_path: str, transform=None, mode: str = "train"):
+        self.h5_path = h5_path
+        self.transform = transform
         self.mode = mode
 
-        with h5py.File(self.dataset_path, "r") as hdf:
-            self.image_ids = list(hdf.keys())
+        with h5py.File(self.h5_path, "r") as f:
+            self.ids = list(f.keys())
 
     def __len__(self):
-        return len(self.image_ids)
+        return len(self.ids)
 
     def __getitem__(self, idx):
-        img_id = self.image_ids[idx]
-        with h5py.File(self.dataset_path, "r") as hdf:
-            img = torch.tensor(np.array(hdf[img_id]["img"]))
-            label = np.array(hdf[img_id]["label"]) if self.mode == "train" else -1
-        return self.preprocessing(img).float(), label
+        key = self.ids[idx]
+        with h5py.File(self.h5_path, "r") as f:
+            img = torch.from_numpy(np.array(f[key]["img"]))  # (C, H, W) uint8
+            label = float(np.array(f[key]["label"])) if self.mode == "train" else -1.0
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        return img, torch.tensor([label], dtype=torch.float32)
 
 
 class PrecomputedDataset(Dataset):
     """
-    Dataset pour features pré-extraites (après passage dans le feature extractor).
+    Dataset léger pour les features pré-extraites.
 
     Args:
-        features: tensor (N, D) des embeddings
-        labels: tensor (N,) des labels
+        features: Tensor (N, D)
+        labels:   Tensor (N,)
     """
 
-    def __init__(self, features, labels):
-        super().__init__()
+    def __init__(self, features: torch.Tensor, labels: torch.Tensor):
         self.features = features
-        self.labels = labels.unsqueeze(-1)
+        self.labels = labels.unsqueeze(-1).float()
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        return self.features[idx], self.labels[idx].float()
+        return self.features[idx], self.labels[idx]

@@ -1,6 +1,6 @@
-torch
-torchvision
-torchmetrics
+torch>=2.0
+torchvision>=0.15
+torchmetrics>=1.0
 h5py
 numpy
 pandas

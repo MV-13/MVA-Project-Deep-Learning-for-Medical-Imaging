@@ -1,84 +1,83 @@
 """
 Prédiction sur le jeu de test avec Test-Time Augmentation (TTA).
 
-Pour chaque image, on extrait les features N fois :
-  - 1 passe sans augmentation (val_transform)
-  - N-1 passes avec augmentations aléatoires (aug_transform)
-On fait la moyenne des probabilités -> prédiction plus robuste au domain shift.
+Stratégie TTA contre le distribution shift :
+  On applique plusieurs fois des augmentations de couleur aléatoires
+  à chaque image de test, puis on moyenne les probabilités.
+  Cela rend la prédiction plus robuste aux variations de coloration.
 """
 
 import h5py
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import BaselineDataset
+import config
+from transforms import get_val_transform, get_tta_transform
 
 
 @torch.no_grad()
-def predict(
-    test_path,
-    feature_extractor,
+def predict_with_tta(
+    test_h5_path: str,
+    backbone,
     classifier,
-    val_transform,
-    aug_transform_fn,
-    n_aug,
-    output_csv,
-    device,
-    batch_size=256,
-    threshold=0.5,
+    device: str,
+    output_csv: str,
+    tta_runs: int = 5,
+    threshold: float = 0.5,
 ):
     """
-    Génère les prédictions sur le jeu de test avec TTA et écrit un CSV de soumission.
+    Génère les prédictions sur le test set avec TTA.
+
+    Pour chaque image :
+      1. On fait 1 prédiction "propre" (val_transform)
+      2. On fait (tta_runs - 1) prédictions augmentées (tta_transform)
+      3. On moyenne toutes les probabilités
+      4. On seuille à `threshold`
 
     Args:
-        test_path:       chemin vers test.h5
-        feature_extractor: modèle DINOv2 (eval mode, frozen)
-        classifier:      tête MLP (eval mode)
-        val_transform:   transform déterministe (sans augmentation)
-        aug_transform_fn: callable qui retourne un nouveau transform aléatoire à chaque appel
-        n_aug:           nombre total de passes TTA (1 déterministe + n_aug-1 aléatoires)
-        output_csv:      chemin du CSV de sortie
-        device:          device de calcul
-        batch_size:      taille de batch pour l'extraction de features
-        threshold:       seuil de décision binaire
+        test_h5_path: chemin vers test.h5
+        backbone: DINOv2 feature extractor (gelé, eval)
+        classifier: tête de classification (eval)
+        device: cuda ou cpu
+        output_csv: chemin du CSV de sortie
+        tta_runs: nombre total de passes par image
+        threshold: seuil binaire
     """
-    feature_extractor.eval()
+    backbone.eval()
     classifier.eval()
 
-    # Collecte les IDs dans l'ordre
-    with h5py.File(test_path, "r") as hdf:
-        test_ids = sorted(hdf.keys(), key=lambda x: int(x))
+    val_tf = get_val_transform()
+    tta_tf = get_tta_transform()
 
-    print(f"TTA : {n_aug} passes sur {len(test_ids)} images test")
-    all_probs = []  # liste de tensors (N,) un par passe
+    results = {"ID": [], "Pred": []}
 
-    for aug_idx in range(n_aug):
-        transform = val_transform if aug_idx == 0 else aug_transform_fn()
-        dataset = BaselineDataset(test_path, transform, mode="test")
-        loader = DataLoader(
-            dataset, shuffle=False, batch_size=batch_size,
-            num_workers=0, pin_memory=device.type == "cuda",
-        )
+    with h5py.File(test_h5_path, "r") as f:
+        test_ids = list(f.keys())
 
-        preds = []
-        for x, _ in tqdm(loader, desc=f"  TTA {aug_idx + 1}/{n_aug}", leave=False):
-            feats = feature_extractor(x.to(device))
-            probs = classifier(feats).squeeze(1).cpu()
-            preds.append(probs)
+        for key in tqdm(test_ids, desc="[Predict TTA]"):
+            raw = torch.from_numpy(np.array(f[key]["img"]))  # (C, H, W) uint8
 
-        all_probs.append(torch.cat(preds))  # (N,)
+            probs = []
 
-    # Moyenne des probabilités sur toutes les passes TTA
-    mean_probs = torch.stack(all_probs, dim=0).mean(dim=0)  # (N,)
+            # 1 passe propre (sans augmentation aléatoire)
+            img_clean = val_tf(raw).unsqueeze(0).to(device)
+            feat = backbone(img_clean)
+            probs.append(classifier(feat).cpu().item())
 
-    results = {
-        "ID": [int(tid) for tid in test_ids],
-        "Pred": (mean_probs > threshold).int().tolist(),
-    }
+            # (tta_runs - 1) passes augmentées
+            for _ in range(tta_runs - 1):
+                img_aug = tta_tf(raw).unsqueeze(0).to(device)
+                feat = backbone(img_aug)
+                probs.append(classifier(feat).cpu().item())
 
-    df = pd.DataFrame(results).set_index("ID").sort_index()
+            # Moyenne des probabilités
+            avg_prob = np.mean(probs)
+            results["ID"].append(int(key))
+            results["Pred"].append(int(avg_prob > threshold))
+
+    df = pd.DataFrame(results).set_index("ID")
     df.to_csv(output_csv)
-    print(f"Fichier de soumission sauvegardé : {output_csv} ({len(df)} prédictions)")
+    print(f"[INFO] Soumission sauvegardée : {output_csv}  ({len(df)} images)")
+    return df
