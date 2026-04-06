@@ -1,8 +1,9 @@
 torch>=2.0
 torchvision>=0.15
-torchmetrics>=1.0
+transformers>=4.30
 h5py
 numpy
 pandas
 tqdm
 matplotlib
+scikit-learn

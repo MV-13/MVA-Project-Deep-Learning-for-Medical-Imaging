@@ -1,8 +1,5 @@
 """
-Datasets pour le chargement des données histopathologiques.
-
-BaselineDataset : lit les images depuis un .h5, applique une transformation.
-PrecomputedDataset : travaille sur les features déjà extraites (linear probing rapide).
+Datasets.
 """
 
 import h5py
@@ -12,26 +9,12 @@ from torch.utils.data import Dataset
 
 
 class BaselineDataset(Dataset):
-    """
-    Charge les images et labels depuis un fichier H5.
-
-    Structure attendue du H5 :
-        ├── idx
-        │   ├── img    (C, H, W) uint8
-        │   ├── label  scalar 0 ou 1
-        │   └── metadata
-
-    Args:
-        h5_path: chemin vers le fichier .h5
-        transform: callable appliquée à l'image (torchvision transforms)
-        mode: 'train' → retourne (image, label) ;  'test' → retourne (image, None)
-    """
+    """Charge les images/labels depuis un fichier H5."""
 
     def __init__(self, h5_path: str, transform=None, mode: str = "train"):
         self.h5_path = h5_path
         self.transform = transform
         self.mode = mode
-
         with h5py.File(self.h5_path, "r") as f:
             self.ids = list(f.keys())
 
@@ -41,27 +24,19 @@ class BaselineDataset(Dataset):
     def __getitem__(self, idx):
         key = self.ids[idx]
         with h5py.File(self.h5_path, "r") as f:
-            img = torch.from_numpy(np.array(f[key]["img"]))  # (C, H, W) uint8
+            img = torch.from_numpy(np.array(f[key]["img"]))
             label = float(np.array(f[key]["label"])) if self.mode == "train" else -1.0
-
         if self.transform is not None:
             img = self.transform(img)
-
         return img, torch.tensor([label], dtype=torch.float32)
 
 
 class PrecomputedDataset(Dataset):
-    """
-    Dataset léger pour les features pré-extraites.
-
-    Args:
-        features: Tensor (N, D)
-        labels:   Tensor (N,)
-    """
+    """Dataset sur features pré-extraites."""
 
     def __init__(self, features: torch.Tensor, labels: torch.Tensor):
         self.features = features
-        self.labels = labels.unsqueeze(-1).float()
+        self.labels = labels.unsqueeze(-1).float() if labels.dim() == 1 else labels.float()
 
     def __len__(self):
         return len(self.labels)
