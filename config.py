@@ -1,31 +1,3 @@
-"""
-Configuration v5 — Approche radicalement différente.
-
-Changement de paradigme :
-  - AVANT : DINOv2 (pré-entraîné sur images naturelles) + classifieur complexe
-  - MAINTENANT : Phikon-v2 (pré-entraîné sur 450M images d'histopathologie)
-    + classifieur très simple
-
-Pourquoi c'est mieux :
-  DINOv2 a appris à représenter des chiens, des voitures, des paysages.
-  Phikon-v2 a appris à représenter des cellules, des tissus, des colorations.
-  Ses features sont nativement pertinentes pour la classification
-  histopathologique et intrinsèquement plus robustes au staining shift
-  car il a vu des centaines de milliers de lames de centres différents.
-
-  Avec des features aussi bonnes, un simple linear probe ou petit MLP
-  suffit — la complexité du classifieur v3/v4 n'était pas nécessaire
-  et pouvait même nuire (overfitting).
-
-Pipeline :
-  1. Phikon-v2 (ViT-L, 1024-dim) comme feature extractor gelé
-  2. Multi-pass augmented extraction (stain jitter + géométrie)
-  3. Classifieur simple : Linear(1024→1) ou petit MLP
-  4. BCEWithLogitsLoss + label smoothing
-  5. SWA pour la généralisation
-  6. TTA au test
-"""
-
 import os
 
 # ─── Chemins ───────────────────────────────────────────────────
@@ -52,7 +24,7 @@ BACKBONE = "owkin/phikon-v2"
 BACKBONE_DIM = 1024
 INPUT_SIZE = (224, 224)
 
-# On garde aussi DINOv2 ViT-L comme 2e backbone pour un ensemble
+# DINOv2 ViT-L comme 2e backbone pour un ensemble
 # Phikon capture le domaine histopath, DINOv2 capture la structure générale
 USE_DINOV2_ENSEMBLE = True
 DINOV2_BACKBONE = "dinov2_vitl14"
@@ -71,9 +43,6 @@ COLOR_JITTER_SATURATION = 0.4
 COLOR_JITTER_HUE = 0.15
 
 # ─── Classifieur ──────────────────────────────────────────────
-# Avec un backbone histopath, un classifieur simple est meilleur.
-# Option 1 : linear probe pur  → HIDDEN_DIMS = []
-# Option 2 : petit MLP          → HIDDEN_DIMS = [256]
 HIDDEN_DIMS = [256]
 DROPOUT = 0.3
 
@@ -92,7 +61,7 @@ MIXUP_ALPHA = 0.2
 
 # Scheduler
 USE_SCHEDULER = True
-T_MAX = 30          # cosine annealing simple, pas de warm restarts
+T_MAX = 30
 
 NUM_EPOCHS = 40
 PATIENCE = 10

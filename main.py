@@ -2,7 +2,7 @@
 """
 Pipeline v5 — Phikon-v2 (pathology foundation model) + DINOv2 ensemble.
 
-Approche radicalement différente des v1-v4 :
+Approche globale :
   - Backbone principal : Phikon-v2, pré-entraîné sur 450M images
     d'histopathologie (au lieu de DINOv2 pré-entraîné sur images naturelles)
   - Classifieur volontairement simple (petit MLP ou linear probe)

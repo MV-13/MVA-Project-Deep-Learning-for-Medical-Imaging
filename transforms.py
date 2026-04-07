@@ -1,6 +1,5 @@
 """
-Augmentations v5. Légèrement plus douces qu'avant car Phikon-v2 est
-déjà robuste aux variations de staining.
+Augmentations
 """
 
 import torch

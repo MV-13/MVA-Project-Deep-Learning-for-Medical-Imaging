@@ -1,7 +1,3 @@
-"""
-Utilitaires v5.
-"""
-
 import copy
 import os
 import random

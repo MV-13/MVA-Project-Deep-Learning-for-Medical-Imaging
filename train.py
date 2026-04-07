@@ -1,16 +1,13 @@
 """
-Entraînement v5 — Simple et efficace.
+Entraînement v5 :
 
-Retour à la simplicité :
   - BCEWithLogitsLoss + label smoothing
   - Cosine annealing
   - SWA en fin d'entraînement
   - Mixup léger
   - Gradient clipping
   - Pas de focal loss, pas de multi-head, pas de CutMix
-  
-Avec des features Phikon-v2, un classifieur simple + bon training
-suffit largement.
+
 """
 
 import numpy as np

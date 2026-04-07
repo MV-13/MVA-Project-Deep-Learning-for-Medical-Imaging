@@ -1,24 +1,3 @@
-"""
-Modèles v5 : Phikon-v2 (pathology foundation model) + optional DINOv2 ensemble.
-
-Phikon-v2 (Owkin) :
-  - ViT-L pré-entraîné avec DINOv2 sur 450M images d'histopathologie
-  - Produit des features 1024-dim via le CLS token
-  - Nativement robuste au staining shift car entraîné sur des données
-    de centres multiples avec des colorations variées
-
-Ensemble optionnel :
-  - Phikon-v2 (1024) + DINOv2 ViT-L (1024) = 2048-dim
-  - Phikon capture le domaine histopath spécifiquement
-  - DINOv2 capture la structure visuelle générale
-  - Les deux se complètent
-
-Classifieur :
-  - Volontairement simple (linear probe ou petit MLP)
-  - Les features Phikon sont tellement bonnes qu'un classifieur
-    complexe ne fait qu'ajouter du risque d'overfitting
-"""
-
 import torch
 import torch.nn as nn
 from transformers import AutoImageProcessor, AutoModel

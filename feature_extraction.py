@@ -1,5 +1,5 @@
 """
-Extraction de features v5 : Phikon-v2 + DINOv2 (optionnel) + multi-pass.
+Extraction de features : Phikon-v2 + DINOv2 + multi-pass.
 """
 
 import os

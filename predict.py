@@ -1,5 +1,5 @@
 """
-Prédiction v5 avec TTA Phikon-v2 + DINOv2.
+Prédiction avec TTA Phikon-v2 + DINOv2.
 """
 
 import numpy as np
